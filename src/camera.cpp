@@ -8,6 +8,7 @@
  ***********************************************************************/
 
 #include "camera.h"
+#include "esp_heap_caps.h"                  
 #include "pin_map.h"
 #include "esp_camera.h"
 #include "esp_now_ctrl.h"
@@ -15,6 +16,25 @@
 #include "log.h"
 #include "esp_now_client.h"
 #include "deep_sleep_ctrl.h"
+
+/* ---- Edge Impulse -------------------------------------------------- */
+#define EI_CLASSIFIER_TFLITE_ENABLE_PSRAM     // arena in PSRAM
+#include <Egg-counter_inferencing.h>
+#include "edge-impulse-sdk/dsp/image/image.hpp"
+
+/* model input */
+constexpr int EI_W = EI_CLASSIFIER_INPUT_WIDTH; 
+constexpr int EI_H = EI_CLASSIFIER_INPUT_HEIGHT;
+
+#define EI_CAMERA_RAW_FRAME_BUFFER_COLS           320
+#define EI_CAMERA_RAW_FRAME_BUFFER_ROWS           240
+#define EI_CAMERA_FRAME_BYTE_SIZE                 3
+
+static uint8_t *snapshot_buf = nullptr;
+
+/* -------------------------------------------------------------------- */
+
+
 
 camera_fb_t *Camera::picture = NULL;
 SemaphoreHandle_t Camera::semaphore = xSemaphoreCreateBinary();
@@ -44,15 +64,79 @@ static camera_config_t camera_config = {
     .ledc_channel = LEDC_CHANNEL_0,
 
     .pixel_format = PIXFORMAT_JPEG, // YUV422,GRAYSCALE,RGB565,JPEG
-    .frame_size = FRAMESIZE_SVGA,   // QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
+    .frame_size = FRAMESIZE_QVGA,   // QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
 
     .jpeg_quality = 10, // 0-63, for OV series camera sensors, lower number means higher quality
     .fb_count = 1,      // When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
     // .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+        .fb_location  = CAMERA_FB_IN_PSRAM, 
 };
+
+/* ------------ EI helper -------------------------------------------- */
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr)
+{
+    size_t pixel_ix = offset * 3;
+    size_t out_ptr_ix = 0;
+
+    while (length--) {
+        out_ptr[out_ptr_ix] = 
+            (snapshot_buf[pixel_ix + 2] << 16) + 
+            (snapshot_buf[pixel_ix + 1] << 8) + 
+            snapshot_buf[pixel_ix];
+        
+        out_ptr_ix++;
+        pixel_ix += 3;
+    }
+    return 0;
+}
+
+static void run_edge_impulse(camera_fb_t *fb)
+{
+    /* JPEG → RGB888 (into PSRAM buffer) */
+    if (!fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf)) {
+        Serial.println("JPEG decode failed");
+        return;
+    }
+
+    // Resize if needed
+    if (EI_CLASSIFIER_INPUT_WIDTH != EI_CAMERA_RAW_FRAME_BUFFER_COLS || 
+        EI_CLASSIFIER_INPUT_HEIGHT != EI_CAMERA_RAW_FRAME_BUFFER_ROWS) {
+        
+        ei::image::processing::crop_and_interpolate_rgb888(
+            snapshot_buf,
+            EI_CAMERA_RAW_FRAME_BUFFER_COLS,
+            EI_CAMERA_RAW_FRAME_BUFFER_ROWS,
+            snapshot_buf,
+            EI_CLASSIFIER_INPUT_WIDTH,
+            EI_CLASSIFIER_INPUT_HEIGHT);
+    }
+
+    ei::signal_t signal;
+    signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+    signal.get_data = &ei_camera_get_data;
+
+    // Run inference
+    ei_impulse_result_t res;
+    EI_IMPULSE_ERROR err = run_classifier(&signal, &res, false);
+
+    Serial.printf("eggs=%u  (DSP:%d ms NN:%d ms)\n",
+                  res.bounding_boxes_count,
+                  res.timing.dsp, res.timing.classification);
+
+    for (size_t i = 0; i < res.bounding_boxes_count; ++i) {
+        auto &bb = res.bounding_boxes[i];
+        if (!bb.value) continue;
+        Serial.printf("  #%u %.2f  [x:%u y:%u w:%u h:%u]\n",
+                      i, bb.value, bb.x, bb.y, bb.width, bb.height);
+    }
+}
+
 
 void Camera::Init()
 {
+    if(!psramInit()) {
+        Serial.println("PSRAM not available");
+    }
     picture = NULL;
     SetTimezone(PopisCasu.Get().c_str());
     esp_err_t err = esp_camera_init(&camera_config);
@@ -66,29 +150,15 @@ void Camera::Init()
     s->set_exposure_ctrl(s, 1); // auto exposure on
     s->set_awb_gain(s, 1);      // Auto White Balance enable (0 or 1)
     s->set_brightness(s, 1);    // (-2 to 2) - set brightness
-    // delay(5000);
-    //    s->set_brightness(s, 0);     // -2 to 2
-    //    s->set_contrast(s, 0);       // -2 to 2
-    //    s->set_saturation(s, 0);     // -2 to 2
-    //    s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
-    //    s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
-    //    s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
-    //    s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
-    //    s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
-    //    s->set_aec2(s, 0);           // 0 = disable , 1 = enable
-    //    s->set_ae_level(s, 0);       // -2 to 2
-    //    s->set_aec_value(s, 300);    // 0 to 1200
-    //    s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
-    //    s->set_agc_gain(s, 0);       // 0 to 30
-    //    s->set_gainceiling(s, (gainceiling_t)0);  // 0 to 6
-    //    s->set_bpc(s, 0);            // 0 = disable , 1 = enable
-    //    s->set_wpc(s, 1);            // 0 = disable , 1 = enable
-    //    s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
-    //    s->set_lenc(s, 1);           // 0 = disable , 1 = enable
-    //    s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
-    //    s->set_vflip(s, 0);          // 0 = disable , 1 = enable
-    //    s->set_dcw(s, 1);            // 0 = disable , 1 = enable
-    //    s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
+
+        if (!snapshot_buf) {
+        snapshot_buf = (uint8_t*)ps_malloc(
+            EI_CAMERA_RAW_FRAME_BUFFER_COLS * 
+            EI_CAMERA_RAW_FRAME_BUFFER_ROWS * 
+            EI_CAMERA_FRAME_BYTE_SIZE);
+        if (!snapshot_buf) {
+            Serial.println("PSRAM alloc failed");        }
+    }
 }
 
 bool Camera::IsDay(void)
@@ -252,6 +322,14 @@ void Camera::TakePicture()
     }
 
     picture = esp_camera_fb_get();
+    if (!picture) {
+        Serial.println("Capture failed");
+        return;
+    }
+
+    if (snapshot_buf) {
+        run_edge_impulse(picture);  // Use renamed function
+    }
 
     digitalWrite(FLASH_PIN, LOW);
 
