@@ -31,6 +31,7 @@ typedef enum
     DEVICE_TYPE_DOOR_CONTROL = 0,
     DEVICE_TYPE_FEEDER = 1,
     DEVICE_TYPE_CAMERA = 2,
+    DEVICE_TYPE_EGG_CAMERA = 3,
 } DeviceType_t;
 
 typedef enum

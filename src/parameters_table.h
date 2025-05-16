@@ -50,7 +50,7 @@
 */
 DefPar_Ram( StavZarizeni,  1,     Parovani,    NormalniMod ,     Sparovano, U16_,   Par_R  ,    Par_Public,    FLAGS_NONE )
 DefPar_Ram( PoriditSnimek,  2,     vypnuto,    vypnuto ,     povoleno, U16_,   Par_RW  ,    Par_Public | Par_ESPNow,    BOOL_FLAG )
-
+DefPar_RTC( PocetVajec, 10,  0,     5,    300, U16_,   Par_R,    Par_Public | Par_ESPNow,    CHART_FLAG )
 // DefPar_RTC( NapetiBaterie_mV, 2,  0,    5,   300, U16_,   Par_R  ,    Par_Public | Par_ESPNow,    CHART_FLAG)
 
 /*

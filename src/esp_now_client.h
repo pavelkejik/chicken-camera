@@ -21,7 +21,7 @@
 #include "camera.h"
 
 #define COMMUNICATION_ATTEMPTS 2
-#define DEVICE_TYPE DEVICE_TYPE_CAMERA
+#define DEVICE_TYPE DEVICE_TYPE_EGG_CAMERA
 #define UPDATE_TIMEOUT_S 100
 
 #define CHECK_SEND(functionCall, resultVar)          \
@@ -399,6 +399,7 @@ public:
 
                     CHECK_BREAK_IF_FAIL(sendParamValues(mac_addr));
                     CHECK_SEND_BREAK_IF_FAIL(ESPNowCtrl::SendMessage(mac_addr, MSG_TIME_SYNC_REQUEST));
+                    CHECK_BREAK_IF_FAIL(SystemLog::SendLogsViaEspNow(mac_addr));
                     CHECK_SEND_BREAK_IF_FAIL(ESPNowCtrl::SendMessage(mac_addr, MSG_TRANSMIT_DONE));
                     Camera::Wake();
                     res = true;
